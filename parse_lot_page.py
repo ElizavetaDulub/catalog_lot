@@ -2,15 +2,16 @@ import logging
 from os import path, getcwd
 import json
 import random
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, Optional
 import time
 import base64
+import re
 
 from seleniumwire import webdriver as webdriver_wire
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
-from selenium.common.exceptions import NoSuchElementException
+from selenium.common.exceptions import NoSuchElementException, ElementNotInteractableException
 
 from fake_useragent import UserAgent
 
@@ -55,19 +56,17 @@ class ParsePage:
         return webdriver_wire.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options,
                                      seleniumwire_options=seleniumwire_options), useragent
 
-    def parse_page(self, parse_url) -> Dict:
-        driver, user_agent = self.get_webdriver()
-        try:
-            driver.get(parse_url)
-            driver.maximize_window()
-
-            area, number = None, None
-            address = driver.find_element(By.CLASS_NAME, "product-rows").find_elements(By.TAG_NAME, "dd")[7].text
-            description = driver.find_elements(By.CLASS_NAME, "ty-product__full-description")[1].text
-            purpose = description.lower().split("назначение")[1].replace(": ", "").replace(",", ".").split(".")[0].strip()
-            floor = description.lower().split("этаж")[1].replace(": ", "").replace(",", ".").split(".")[0].strip()
+    def parse_description(self, driver, description) -> Tuple:
+        area, number, purpose, floor, entrance = None, None, None, None, None
+        if 'назначение' in description:
+            purpose = description.lower().split("назначение")[1].replace(": ", "").replace(",", ".").split(".")[
+                0].strip()
+        elif 'этаж' in description:
+            floor = description.lower().split("этаж")[1].replace(": ", "").replace(",", ".").split(".")[
+                0].strip()
+        elif 'входы' in description:
             entrance = description.lower().split("входы:")[1].split(".")[0]
-
+        try:
             driver.find_element(By.ID, "ui-id-1").click()
 
             for item in driver.find_element(By.CLASS_NAME, "ui-accordion-content").find_elements(
@@ -76,15 +75,43 @@ class ParsePage:
                     number = item.find_element(By.CLASS_NAME, "ty-control-group__item").text
                 elif item.find_element(By.CLASS_NAME, "ty-control-group__label").text == 'Общая площадь':
                     area = item.find_element(By.CLASS_NAME, "ty-control-group__item").text
+        except (ElementNotInteractableException, NoSuchElementException):
+            pass
 
-            if not area:
-                area = description.lower().split("площад")[1].split()[1]
-            if not number:
-                number = description.lower().split("кадастровый номер").split()[-1].split(".")[0]
+        return area, number, floor, entrance, purpose
+
+    def parse_page(self, parse_url) -> Dict:
+        driver, user_agent = self.get_webdriver()
+        try:
+            driver.get(parse_url)
+            # driver.maximize_window()
+
+            area, number, purpose, floor, entrance = None, None, None, None, None
+            description = driver.find_elements(By.CLASS_NAME, "ty-product__full-description")[-1].text
+
+            if 'имущество должников' in driver.find_element(By.CLASS_NAME, "product-rows").find_elements(
+                    By.TAG_NAME, "dd")[0].text.lower():
+
+                address = driver.find_element(By.CLASS_NAME, "product-rows").find_elements(By.TAG_NAME, "dd")[5].text
+                area, number, floor, entrance, purpose = self.parse_description(driver, description)
+                if 'использование' in description:
+                    purpose = description.lower().split("использование")[1].replace(": ", "").replace(",", ".").split(".")[0].strip()
+                if not area:
+                    area = "".join(re.findall('([0-9][,|.]{0,1})', description.lower().split("площадь")[1].replace(": ", "").split("м")[0]))
+                if not number:
+                    number = ', '.join(re.findall('([0-9]{2}[:]{1}[0-9]{2}[:][0-9]{6,7}[:][0-9]{3,4})', description.lower()))
+            else:
+                address = driver.find_element(By.CLASS_NAME, "product-rows").find_elements(By.TAG_NAME, "dd")[7].text
+                area, number, floor, entrance, purpose = self.parse_description(driver, description)
+                if not area:
+                    # area = description.lower().split("площадь")[1].split()[1]
+                    area = ''.join(re.findall('[\d,|.]\d', description.lower().split("площадь")[1].replace(": ", "").split()[0]))
+                if not number:
+                    number = ', '.join(re.findall('([0-9]{2}[:]{1}[0-9]{2}[:][0-9]{6,7}[:][0-9]{3,4})', description.lower()))
 
             try:
                 participants = len(driver.find_elements(By.ID, "rejected_participants")[0].find_elements(By.TAG_NAME, "tr"))
-            except NoSuchElementException:
+            except (NoSuchElementException, IndexError):
                 participants = 0
                 pass
 
@@ -100,4 +127,4 @@ class ParsePage:
 
 
 test = ParsePage()
-print(test.parse_page("https://catalog.lot-online.ru/index.php?dispatch=products.view&product_id=698458"))
+print(test.parse_page("https://catalog.lot-online.ru/index.php?dispatch=products.view&product_id=770998"))
