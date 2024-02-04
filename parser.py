@@ -4,6 +4,7 @@ import time
 import coloredlogs
 from logging import handlers
 import os
+import numpy as np
 import coloredlogs
 from typing import Any
 
@@ -21,16 +22,20 @@ import logging
 from multiprocessing.pool import ThreadPool as Pool
 from multiprocessing import Process
 from multiprocessing import Semaphore
+import re
+from selenium.common.exceptions import NoSuchElementException, ElementNotInteractableException
 
 from queue import Queue
 
-logger = logging.getLogger('seleniumwire.webdriver.remote.remote_connection')
-logger.setLevel(logging.INFO)
+logger = logging.getLogger('seleniumwire')
+logger.setLevel(logging.ERROR)
+# logger.setLevel(logging.INFO)
 
 coloredlogs.install(level='INFO')
-main_data = pd.read_excel('Main_data.xlsx')
+main_data = pd.read_excel('Main_data_spb.xlsx')
 missed_urls = list()
 numbers_list = list()
+
 
 # @classmethod
 def get_logger(name=None, level=logging.DEBUG):
@@ -69,56 +74,88 @@ def get_webdriver() -> Any:
 
 
 class ParseLot:
-    def __init__(self, filename: str = 'catalog_2023.xlsx'):
-        self.main_data = pd.read_excel(filename)
-        self.module_logger = get_logger("parse_catalog_lot")
+    def __init__(self, filename: str = None):
+        # self.main_data = pd.read_excel(filename)
+        self.module_logger = get_logger("seleniumwire")
+        # self.module_logger = get_logger("parse_catalog_lot")
+        self.module_logger.setLevel(logging.INFO)
+        # self.module_logger.setLevel(logging.ERROR)
         self.missed_urls = list()
 
-    def parse_lot(self, index: int = 1, url: str = None):
+    def parse_description(self, driver, description):
+        area, number, purpose, floor, entrance = None, None, None, None, None
+        if 'назначение' in description:
+            purpose = description.lower().split("назначение")[1].replace(": ", "").replace(",", ".").split(".")[
+                0].strip()
+        elif 'этаж' in description:
+            floor = description.lower().split("этаж")[1].replace(": ", "").replace(",", ".").split(".")[
+                0].strip()
+        elif 'входы' in description:
+            entrance = description.lower().split("входы:")[1].split(".")[0]
+        try:
+            driver.find_element(By.ID, "ui-id-1").click()
+
+            for item in driver.find_element(By.CLASS_NAME, "ui-accordion-content").find_elements(
+                    By.CLASS_NAME, "product-list-field"):
+                if item.find_element(By.CLASS_NAME, "ty-control-group__label").text == 'Кадастровый номер':
+                    number = item.find_element(By.CLASS_NAME, "ty-control-group__item").text
+                elif item.find_element(By.CLASS_NAME, "ty-control-group__label").text == 'Общая площадь':
+                    area = item.find_element(By.CLASS_NAME, "ty-control-group__item").text
+        except (ElementNotInteractableException, NoSuchElementException):
+            pass
+
+        return area, number, floor, entrance, purpose
+
+    def parse_lot(self, url: str = None):
         driver = get_webdriver()
         try:
             driver.get(url)
-            area, number = None, None
-            address = driver.find_element(By.CLASS_NAME, "product-rows").find_elements(By.TAG_NAME, "dd")[7].text
+            # driver.maximize_window()
+
+            area, number, purpose, floor, entrance = None, None, None, None, None
             description = driver.find_elements(By.CLASS_NAME, "ty-product__full-description")[-1].text
-            try:
-                purpose = description.lower().split("назначение")[1].replace(": ", "").replace(",", ".").split(".")[
-                    0].strip()
-            except IndexError:
-                purpose = None
-            try:
-                floor = description.lower().split("этаж")[1].replace(": ", "").replace(",", ".").split(".")[0].strip()
-            except IndexError:
-                floor = None
-            try:
-                entrance = description.lower().split("входы:")[1].split(".")[0]
-            except IndexError:
-                entrance = None
-            try:
-                driver.find_element(By.ID, "ui-id-1").click()
-                for item in driver.find_element(By.CLASS_NAME, "ui-accordion-content").find_elements(
-                        By.CLASS_NAME, "product-list-field"):
-                    if item.find_element(By.CLASS_NAME, "ty-control-group__label").text == 'Кадастровый номер':
-                        number = item.find_element(By.CLASS_NAME, "ty-control-group__item").text
-                    elif item.find_element(By.CLASS_NAME, "ty-control-group__label").text == 'Общая площадь':
-                        area = item.find_element(By.CLASS_NAME, "ty-control-group__item").text
-            except Exception as exc:
-                module_logger.error(f"Error appeared in time parsing page{str(exc)}")
-                pass
 
-            if not area:
-                try:
-                    area = description.lower().split("площад")[1].split()[1]
-                except IndexError:
-                    area = None
-            if not number:
-                try:
-                    number = description.lower().split("кадастровый номер")[1].split('.')[0].split()[-1]
-                except IndexError:
-                    number = None
-            state = driver.find_element(By.ID, "bidding_result").text
+            if 'имущество должников' in driver.find_element(By.CLASS_NAME, "product-rows").find_elements(
+                    By.TAG_NAME, "dd")[0].text.lower():
 
-            if state == '':
+                address = driver.find_element(By.CLASS_NAME, "product-rows").find_elements(By.TAG_NAME, "dd")[5].text
+                area, number, floor, entrance, purpose = self.parse_description(driver, description)
+                if 'использование' in description:
+                    purpose = \
+                        description.lower().split("использование")[1].replace(": ", "").replace(",", ".").split(".")[
+                            0].strip()
+                if not area:
+                    try:
+                        area = "".join(re.findall('([0-9][,|.]{0,1})',
+                                                  description.lower().split("площадь")[1].replace(": ", "").split("м")[0]))
+                    except IndexError:
+                        pass
+                if not number:
+                    number = ', '.join(
+                        re.findall('([0-9]{2}[:]{1}[0-9]{2}[:][0-9]{6,7}[:][0-9]{3,4})', description.lower()))
+            else:
+                try:
+                    address = driver.find_element(By.CLASS_NAME, "product-rows").find_elements(By.TAG_NAME, "dd")[7].text
+                except IndexError:
+                    try:
+                        address = [item.find_element(By.TAG_NAME, 'dd').text for item in
+                                   driver.find_element(By.CLASS_NAME, "product-rows").find_elements(By.TAG_NAME, "div") if
+                                   'Адрес' in item.text][0]
+                    except:
+                        address = None
+                area, number, floor, entrance, purpose = self.parse_description(driver, description)
+                if not area:
+                    try:
+                        area = ''.join(
+                            re.findall('[\d,|.]\d', description.lower().split("площадь")[1].replace(": ", "").split()[0]))
+                    except IndexError:
+                        pass
+                if not number:
+                    number = ', '.join(
+                        re.findall('([0-9]{2}[:]{1}[0-9]{2}[:][0-9]{6,7}[:][0-9]{3,4})', description.lower()))
+            try:
+                state = driver.find_element(By.ID, "bidding_result").text
+            except NoSuchElementException:
                 try:
                     state = driver.find_element(By.ID, "lot_status").text
                 except:
@@ -127,13 +164,13 @@ class ParseLot:
             try:
                 participants = len(
                     driver.find_elements(By.ID, "rejected_participants")[0].find_elements(By.TAG_NAME, "tr"))
-            except NoSuchElementException:
+            except (NoSuchElementException, IndexError):
                 participants = 0
                 pass
-            numbers_list.append(number)
             new_data = [address, area, number, floor, entrance, purpose, participants, state]
+            # driver.close()
+            # driver.quit()
             return new_data
-            # add_row_to_data(new_data=new_data, index=index)
         except Exception as exc:
             module_logger.error(f"Was exception {str(exc)} \n While parsed link {url} ")
             with open(r'missed_links_data.txt', 'a') as fp:
@@ -144,18 +181,18 @@ class ParseLot:
 
 
 def parse_page(*params):
-    parser = ParseLot()
+    parser = ParseLot(filename="Main_data_spb.xlsx")
     index, url = params
     module_logger.info(f'Running parse page {index}. {url}')
-    new_data = parser.parse_lot(index, url)
+    new_data = parser.parse_lot(url)
     main_data.loc[index, ["Адрес", "Площадь", "Кадастровый номер", "Этаж", "Входы", "Назначение",
                           "Отклоненные участники", "Состояние"]] = new_data
-    main_data.to_excel("Main_data.xlsx", index=False)
+    main_data.to_excel("Main_data_spb.xlsx", index=False)
 
 
 def run_threads(max_concurrent_requests=1):
     # urls = main_data.drop_duplicates(subset='Название лота', keep='first').loc[:, 'Ссылка на лот'].to_list()
-    urls = main_data.loc[:, 'Ссылка на лот'].to_list()
+    urls = main_data.loc[np.isnan(main_data.loc[:, 'Отклоненные участники']), 'Ссылка на лот'].to_list()  #
     module_logger.info(f"Amount of parse urls is {str(len(urls))}.")
     args = [(main_data.loc[main_data['Ссылка на лот'] == url].index[0], url) for url in urls]
     with Pool(processes=max_concurrent_requests) as pool:
@@ -165,4 +202,4 @@ def run_threads(max_concurrent_requests=1):
 if __name__ == '__main__':
     # parser = ParseLot('catalog_2023.xlsx')
     # asyncio.run(parser.process_links(max_concurrent_requests=3))
-    run_threads(max_concurrent_requests=12)
+    run_threads(max_concurrent_requests=8)
